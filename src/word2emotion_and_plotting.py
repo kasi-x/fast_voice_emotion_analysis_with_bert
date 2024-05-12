@@ -1,17 +1,18 @@
-import sounddevice as sd
-import numpy as np
-import matplotlib.pyplot as plt
-import threading
-import torch
-from transformers import WhisperProcessor, WhisperForConditionalGeneration
-from transformers import BertTokenizer, BertForSequenceClassification
 import queue
+import threading
+
+import matplotlib.pyplot as plt
+import numpy as np
+import sounddevice as sd
+import torch
+from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 # SETTINGS
 BLOCKSIZE = 24678 // 5
 SILENCE_THRESHOLD = 700
 MIN_AUDIO_LENGTH = 8000
 SILENCE_RATIO = 300
+SAVE_PATH = "transcriptions.txt"
 
 # Initialize Whisper model and processor
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -21,37 +22,24 @@ model = WhisperForConditionalGeneration.from_pretrained(model_name).to(device)
 model = model.half()
 forced_decoder_ids = processor.get_decoder_prompt_ids(language="ja", task="transcribe")
 
-# Initialize BERT model and tokenizer for sentiment analysis
-BERT_MODEL_NAME = "nlptown/bert-base-multilingual-uncased-sentiment"
-tokenizer = BertTokenizer.from_pretrained(BERT_MODEL_NAME)
-bert_model = BertForSequenceClassification.from_pretrained(BERT_MODEL_NAME).to(device)
-bert_model = bert_model.half()
-
 global_ndarray = None
 audio_queue = queue.Queue()
-classification_queue = queue.Queue()
+
+running = True
 
 
 def audio_capture_thread():
     with sd.InputStream(
-        samplerate=16000, channels=1, dtype="int16", blocksize=BLOCKSIZE
+        samplerate=16000,
+        channels=1,
+        dtype="int16",
+        blocksize=BLOCKSIZE,
     ) as stream:
-        while True:
+        while running:
             indata, status = stream.read(BLOCKSIZE)
-            audio_queue.put((indata, status))
+            audio_queue.put(indata)
 
-
-def bert_classification():
-    while True:
-        transcription = classification_queue.get()
-        inputs = tokenizer(
-            transcription, return_tensors="pt", truncation=True, padding=True, max_length=256
-        ).to(device)
-        outputs = bert_model(**inputs)
-        predicted_label_idx = torch.argmax(outputs.logits, dim=1).item()
-
-        labels = ["very negative", "negative", "neutral", "positive", "very positive"]
-        print(f"Predicted emotion: {labels[predicted_label_idx]}")
+    audio_queue.put(None)  # Sentinel value to indicate end of stream
 
 
 def transcription_and_plotting():
@@ -63,8 +51,11 @@ def transcription_and_plotting():
 
     global global_ndarray
 
-    while True:
-        indata, status = audio_queue.get()
+    while running:
+        indata = audio_queue.get()
+        if indata is None:  # If end of stream sentinel is found, break the loop
+            break
+
         indata_flattened = abs(indata.flatten())
 
         line.set_ydata(indata)
@@ -86,28 +77,34 @@ def transcription_and_plotting():
             indata_transformed = global_ndarray.flatten().astype(np.float32) / 32768.0
             global_ndarray = None
             input_data = processor(
-                indata_transformed, sampling_rate=16000, return_tensors="pt"
+                indata_transformed,
+                sampling_rate=16000,
+                return_tensors="pt",
             ).input_features
             input_data = input_data.half()
             predicted_ids = model.generate(
-                input_data.to(device), forced_decoder_ids=forced_decoder_ids
+                input_data.to(device),
+                forced_decoder_ids=forced_decoder_ids,
             )
 
-            transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)
+            transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
             print(f"Transcription: {transcription}")
 
-            # BERT分類スレッドに転送
-            classification_queue.put(transcription[0])
+            # with open(SAVE_PATH, "a", encoding="utf-8", buffering=0) as file:
+            with open(SAVE_PATH, "a", encoding="utf-8") as file:
+                file.write(transcription + "\n")
+                file.flush()
 
 
 if __name__ == "__main__":
     capture_thread = threading.Thread(target=audio_capture_thread)
-    classification_thread = threading.Thread(target=bert_classification)
-
     capture_thread.start()
-    classification_thread.start()
 
     try:
         transcription_and_plotting()
     except KeyboardInterrupt:
         print("\nInterrupted by user")
+        running = False
+        plt.close()
+
+    capture_thread.join()
