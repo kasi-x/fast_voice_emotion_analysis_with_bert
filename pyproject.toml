@@ -2,7 +2,7 @@
 name = "fast-emotion"
 version = "0.1.0"
 description = ""
-authors = ["anosillus <anosillus@gmail.com>"]
+authors = ["kashi-x <kashi-x@gmail.com>"]
 license = "private"
 readme = "README.rst"
 packages = [{ include = "src" }]
